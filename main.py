@@ -192,12 +192,13 @@ class BackgroudVideo:
 
             # Save the formatted clip back to the directory
             clip.write_videofile(os.path.join(BACKGROUND_VIDEOS_DIR, clip_name), codec="libx264", audio_codec="aac")
-            
+
+import logging
+
 class VideoCreation:
     # Class attributes for video and audio clips
     clip = None
     audio = None
-    background_clip = None
 
     def __init__(self, clip: VideoFileClip) -> None:
         # Initialize the VideoCreation object with a video clip
@@ -205,33 +206,24 @@ class VideoCreation:
         self.audio = clip.audio  # Extract audio from the video clip
 
     def __deinit__(self) -> None:
-        # Clean up resources by closing video and background clips
+        # Clean up resources by closing video
         if self.clip:
             self.clip.close()
             self.clip = None
-        if self.background_clip:
-            self.background_clip.close()
-            self.background_clip = None
 
     def process(self) -> VideoClip:
-        # Main processing function to create the final video
-        self.clip = self.create_final_clip()  # Create the final video clip
+        # Main processing function to create the final video with captions
         transcription = self.create_transcription(self.audio)  # Generate transcription from audio
+        logging.info(f"Transcription generated: {transcription}")
+        
+        # Check if transcription is empty
+        if not transcription:
+            logging.warning("No transcription available. Returning original clip without captions.")
+            return self.clip
+
         self.clip = self.add_captions_to_video(self.clip, transcription)  # Add captions to the video
 
         return self.clip  # Return the processed video clip
-
-    def create_final_clip(self):
-        # Create the final video clip with a background
-        self.background_clip = BackgroudVideo.get_clip(self.clip.duration)  # Get background video clip
-
-        _, background_height = self.background_clip.size  # Get the height of the background clip
-        target_dimensions = (FULL_RESOLUTION[0], FULL_RESOLUTION[1] - background_height)  # Calculate target dimensions
-        self.clip = VideoTools(self.clip).crop(target_dimensions[0], target_dimensions[1])  # Crop the main clip
-
-        # Combine the main clip and background clip
-        self.clip = clips_array([[self.clip], [self.background_clip]])
-        return self.clip  # Return the combined clip
 
     def create_transcription(self, audio):
         # Generate transcription from the audio
@@ -285,6 +277,7 @@ class VideoCreation:
         for pos, timestamp in enumerate(timestamps):
             start, end = timestamp["timestamp"]
             text = timestamp["text"]
+            logging.info(f"Adding caption '{text}' from {start} to {end}")
 
             # If there is a gap before the current caption, add the previous clip
             if start > previous_time and len(queued_texts) == 0:
@@ -321,12 +314,8 @@ class VideoCreation:
                 continue
 
             # Add the captioned clip to the list
-            clips.append(
-                self.add_text_to_video(
-                    clip.subclip(full_start, end),
-                    text
-                )
-            )
+            captioned_clip = self.add_text_to_video(clip.subclip(full_start, end), text)
+            clips.append(captioned_clip)
 
             previous_time = end  # Update the previous time
             full_start = None  # Reset full start for the next caption
@@ -343,35 +332,46 @@ class VideoCreation:
 
     def add_text_to_video(self, clip, text):
         # Add text overlay to the video clip
-        text_image = self.create_text_image(
-            text,
-            os.path.join(FONTS_DIR, FONT_NAME),
-            FONT_SIZE,
-            clip.size[0]
-        )
+        font_path = os.path.join(FONTS_DIR, FONT_NAME)
+        if not os.path.exists(font_path):
+            logging.error(f"Font file not found: {font_path}")
+            return clip  # Return original clip if font is missing
+
+        # Create the text image
+        text_image = self.create_text_image(text, font_path, FONT_SIZE, clip.size[0])
+        if text_image is None:
+            logging.error("Failed to create text image.")
+            return clip
 
         image_clip = ImageClip(np.array(text_image), duration=clip.duration)  # Create an image clip for the text
 
-        y_offset = round(FULL_RESOLUTION[1] * (TEXT_POSITION_PERCENT / 100))  # Calculate vertical position for text
-        clip = CompositeVideoClip([clip, image_clip.set_position((0, y_offset,))])  # Overlay text on the video
+        # Temporarily center the text vertically to check visibility
+        # y_offset = round(FULL_RESOLUTION[1] * (TEXT_POSITION_PERCENT / 100))  # Calculate vertical position for text
+        y_offset = clip.size[1] // 2  # Center the text vertically
+        clip = CompositeVideoClip([clip, image_clip.set_position(("center", y_offset))])  # Overlay text on the video
 
         return clip  # Return the video clip with text
 
     def create_text_image(self, text, font_path, font_size, max_width):
         # Create an image with the specified text
+        try:
+            font = ImageFont.truetype(font_path, font_size)  # Load the specified font
+        except IOError:
+            logging.error(f"Unable to load font from {font_path}")
+            return None
+
         image = Image.new("RGBA", (max_width, font_size * 10), (0, 0, 0, 0))  # Create a transparent image
-
-        font = ImageFont.truetype(font_path, font_size)  # Load the specified font
-
         draw = ImageDraw.Draw(image)  # Create a drawing context
 
         # Get the bounding box for the text
         _, _, w, h = draw.textbbox((0, 0), text, font=font)
 
         # Draw the text on the image with stroke for better visibility
-        draw.text(((max_width - w) / 2, round(h * 0.2)), text, font=font, fill="white", stroke_width=FONT_BORDER_WEIGHT, stroke_fill='black')
+        draw.text(((max_width - w) / 2, round(h * 0.2)), text, font=font, fill="white",
+                  stroke_width=FONT_BORDER_WEIGHT, stroke_fill="black")
 
-        image = image.crop((0, 0, max_width, round(h * 1.6),))  # Crop the image to the desired size
+        image = image.crop((0, 0, max_width, round(h * 1.6)))  # Crop the image to the desired size
+        logging.info(f"Created text image for: '{text}'")
 
         return image  # Return the created text image
 
